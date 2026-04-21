@@ -1,0 +1,19 @@
+# 環境変数（絶対にコミットしない）
+.env
+
+# Goビルド成果物
+server
+server.exe
+/app/server
+
+# Goキャッシュ
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
