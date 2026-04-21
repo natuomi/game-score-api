@@ -8,13 +8,14 @@ services:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      - DB_HOST=postgres    # Docker内ではサービス名で通信
+      - REDIS_HOST=redis    # Docker内ではサービス名で通信
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    volumes:
-      - .:/app  # ホットリロード用（air使用時）
     restart: unless-stopped
 
   # PostgreSQL（RDB）
