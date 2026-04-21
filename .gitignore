@@ -1,9 +1,9 @@
 # 環境変数（絶対にコミットしない）
 .env
 
-# Goビルド成果物
-server
-server.exe
+# Goビルド成果物（ルート直下のバイナリのみ。cmd/server/ディレクトリは除外しない）
+/server
+/server.exe
 /app/server
 
 # Goキャッシュ
