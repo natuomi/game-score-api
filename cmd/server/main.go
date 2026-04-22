@@ -10,6 +10,7 @@ import (
 	"game-score-api/pkg/database"
 	"game-score-api/pkg/middleware"
 
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
@@ -46,6 +47,14 @@ func main() {
 
 	// ── ルーティング ──────────────────────────────────
 	r := gin.Default()
+
+	// CORS設定（Vercelフロントエンドからのアクセスを許可）
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"https://game-score-frontend-zeta.vercel.app"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowCredentials: true,
+	}))
 
 	// ヘルスチェック（ECS の ALB ヘルスチェック用）
 	r.GET("/health", func(c *gin.Context) {
