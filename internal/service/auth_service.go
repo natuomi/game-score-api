@@ -15,10 +15,13 @@ import (
 
 // AuthService はユーザー認証のビジネスロジックを担当する
 type AuthService struct {
-	userRepo *repository.UserRepository
+	userRepo repository.UserRepositoryInterface
 }
 
-func NewAuthService(userRepo *repository.UserRepository) *AuthService {
+// NewAuthService は AuthService を生成する
+// userRepo には *repository.UserRepository を渡す（本番）か、
+// テスト用モックを渡す（テスト）ことができる
+func NewAuthService(userRepo repository.UserRepositoryInterface) *AuthService {
 	return &AuthService{userRepo: userRepo}
 }
 

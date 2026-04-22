@@ -16,13 +16,25 @@ import (
 
 const rankingCacheKey = "rankings:top"
 
-// ScoreService はスコア管理とランキングのビジネスロジックを担当する
-type ScoreService struct {
-	scoreRepo *repository.ScoreRepository
-	redis     *redis.Client
+// RedisClient は Redis 操作を抽象化するインターフェース
+// テスト時に手書きモックを差し込めるようにする
+type RedisClient interface {
+	Get(ctx context.Context, key string) *redis.StringCmd
+	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd
+	Del(ctx context.Context, keys ...string) *redis.IntCmd
 }
 
-func NewScoreService(scoreRepo *repository.ScoreRepository, rdb *redis.Client) *ScoreService {
+// ScoreService はスコア管理とランキングのビジネスロジックを担当する
+type ScoreService struct {
+	scoreRepo repository.ScoreRepositoryInterface
+	redis     RedisClient
+}
+
+// NewScoreService は ScoreService を生成する
+// scoreRepo には *repository.ScoreRepository を渡す（本番）か、
+// テスト用モックを渡す（テスト）ことができる
+// rdb には *redis.Client を渡す（本番）か、テスト用モックを渡す（テスト）ことができる
+func NewScoreService(scoreRepo repository.ScoreRepositoryInterface, rdb RedisClient) *ScoreService {
 	return &ScoreService{scoreRepo: scoreRepo, redis: rdb}
 }
 

@@ -92,9 +92,12 @@ game-score-api/
 │   │   ├── score.go            # POST /scores, GET /scores/me, GET /rankings
 │   │   └── player.go           # GET /players, GET /players/:id
 │   ├── service/
-│   │   ├── auth_service.go     # Register (bcrypt), Login (JWT issue)
-│   │   └── score_service.go    # Score submit, Redis cache logic
+│   │   ├── auth_service.go          # Register (bcrypt), Login (JWT issue)
+│   │   ├── auth_service_test.go     # Unit tests — Register / Login (5 cases)
+│   │   ├── score_service.go         # Score submit, Redis cache logic
+│   │   └── score_service_test.go    # Unit tests — PostScore / GetRankings (5 cases)
 │   ├── repository/
+│   │   ├── interfaces.go       # UserRepositoryInterface, ScoreRepositoryInterface
 │   │   ├── user_repo.go        # Create, FindByEmail, FindByID, FindAll
 │   │   └── score_repo.go       # Create, FindByUserID, GetRankings, CountAll
 │   └── model/
@@ -246,6 +249,52 @@ Full OpenAPI 3.0 specification: [`docs/swagger.yaml`](docs/swagger.yaml)
 You can preview it with:
 - [Swagger Editor](https://editor.swagger.io/) — paste the YAML content
 - VS Code extension: **OpenAPI (Swagger) Editor**
+
+---
+
+## Running Tests
+
+Unit tests are provided for the service layer (`internal/service/`).  
+No database or Redis connection is required — all external dependencies are replaced with in-memory hand-written mocks.
+
+### Run all unit tests
+
+```bash
+go test ./internal/service/...
+```
+
+### Run with verbose output
+
+```bash
+go test ./internal/service/... -v
+```
+
+### Run with coverage report
+
+```bash
+go test ./internal/service/... -cover
+```
+
+### What is tested
+
+| Test file | Covered scenarios |
+|-----------|-------------------|
+| `auth_service_test.go` | Register success (bcrypt hash verification, repo.Create called) |
+| | Register failure (duplicate email) |
+| | Login success (JWT token generated, user returned) |
+| | Login failure — password mismatch |
+| | Login failure — user not found (returns same error as mismatch, prevents enumeration) |
+| `score_service_test.go` | PostScore success (repo.Create called, Redis cache invalidated) |
+| | PostScore with explicit GameMode |
+| | GetRankings cache HIT (Redis hit, DB not called, `cached: true`) |
+| | GetRankings cache MISS (DB queried, result stored in Redis, `cached: false`) |
+| | GetRankings DB error propagation |
+
+### Design notes
+
+- Mocks are hand-written implementations of `repository.UserRepositoryInterface`, `repository.ScoreRepositoryInterface`, and `service.RedisClient` — no third-party mock libraries required.
+- `JWT_SECRET` is set per-test via `t.Setenv` (automatically restored after each test).
+- Tests that use `t.Setenv` run sequentially (not parallel) to comply with Go's testing restrictions.
 
 ---
 
