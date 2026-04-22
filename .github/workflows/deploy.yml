@@ -1,0 +1,121 @@
+# ============================================================
+# Deploy workflow — game-score-api
+# ============================================================
+# Trigger : push to the `main` branch
+# What it does:
+#   1. Check out the repository
+#   2. Set up Go 1.23
+#   3. Cross-compile a Linux/amd64 binary
+#   4. Transfer the binary to AWS EC2 via SCP
+#   5. Restart the server process over SSH
+#
+# Required GitHub Secrets (Settings → Secrets and variables → Actions):
+#   EC2_HOST    — Public IP or hostname of the EC2 instance
+#   EC2_USER    — SSH login user (e.g., ec2-user, ubuntu)
+#   EC2_SSH_KEY — Private SSH key (full PEM content, including header/footer)
+# ============================================================
+
+name: Build and Deploy to EC2
+
+on:
+  push:
+    branches:
+      - main  # Run this workflow only when code is pushed to main
+
+jobs:
+  build-and-deploy:
+    name: Build Go binary and deploy to EC2
+    runs-on: ubuntu-latest  # Use GitHub-hosted Ubuntu runner
+
+    steps:
+      # ── Step 1: Check out the code ──────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Step 2: Set up the Go toolchain ─────────────────────────────
+      - name: Set up Go 1.23
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true  # Cache downloaded modules to speed up future builds
+
+      # ── Step 3: Download Go module dependencies ──────────────────────
+      - name: Download dependencies
+        run: go mod download
+
+      # ── Step 4: Build a Linux binary (cross-compilation) ─────────────
+      # GOOS=linux  → target OS is Linux (EC2 runs Amazon Linux / Ubuntu)
+      # GOARCH=amd64 → target CPU architecture is x86-64
+      # -o bin/server-linux → output path for the compiled binary
+      - name: Build Linux binary
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o bin/server-linux ./cmd/server
+        env:
+          CGO_ENABLED: 0  # Disable CGO for a fully static binary (no libc dependency)
+
+      # ── Step 5: Set up the SSH private key ───────────────────────────
+      # Write the PEM key to a temp file and set correct permissions.
+      # GitHub Actions masks secret values in logs automatically.
+      - name: Configure SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2_key.pem
+          chmod 600 ~/.ssh/ec2_key.pem
+          # Add EC2 host to known_hosts to prevent interactive host-key prompt
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      # ── Step 6: Transfer the binary to EC2 ───────────────────────────
+      # SCP copies the compiled binary from the runner to the EC2 instance.
+      # The remote path ~/bin/ must exist on EC2 (created if missing below).
+      - name: Upload binary to EC2
+        run: |
+          # Ensure the target directory exists on the remote server
+          ssh -i ~/.ssh/ec2_key.pem \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "mkdir -p ~/bin"
+          # Copy the binary
+          scp -i ~/.ssh/ec2_key.pem \
+            bin/server-linux \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:~/bin/server-linux"
+
+      # ── Step 7: Restart the server on EC2 ────────────────────────────
+      # Kill the currently running server process (if any), then start the
+      # new binary in the background using nohup so it survives SSH disconnect.
+      - name: Restart server on EC2
+        run: |
+          ssh -i ~/.ssh/ec2_key.pem \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" << 'ENDSSH'
+              # Make the new binary executable
+              chmod +x ~/bin/server-linux
+
+              # Stop the currently running server (ignore errors if not running)
+              pkill -f "server-linux" || true
+
+              # Wait briefly to ensure the port is released before restart
+              sleep 2
+
+              # Start the server in the background
+              # Logs are appended to ~/server.log
+              nohup ~/bin/server-linux > ~/server.log 2>&1 &
+
+              echo "Server restarted. PID: $!"
+          ENDSSH
+
+      # ── Step 8: Verify deployment ─────────────────────────────────────
+      # Poll the health endpoint to confirm the server is accepting requests.
+      # Retry up to 10 times with 3-second intervals before failing the job.
+      - name: Health check
+        run: |
+          echo "Waiting for server to come up..."
+          for i in $(seq 1 10); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              "http://${{ secrets.EC2_HOST }}:8080/health" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i: status=$STATUS — retrying in 3s..."
+            sleep 3
+          done
+          echo "Health check failed after 10 attempts"
+          exit 1

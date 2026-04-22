@@ -1,113 +1,267 @@
 # game-score-api
 
-ゲームスコアランキングAPI — Go / PostgreSQL / Redis / AWS ECS
-
-**目的:** Goサーバーサイド技術（Go・AWS・RDB/NoSQL）の習得とappworksポートフォリオ掲載
-
----
-
-## 技術スタック
-
-| レイヤー | 技術 |
-|---------|------|
-| 言語 | Go 1.22 |
-| フレームワーク | Gin |
-| RDB | PostgreSQL 16 |
-| キャッシュ | Redis 7 |
-| 認証 | JWT (golang-jwt) |
-| コンテナ | Docker / Docker Compose |
-| デプロイ | AWS ECS Fargate + RDS + ElastiCache |
-| CI/CD | GitHub Actions |
+A production-ready Game Score Ranking API built with **Go**, **PostgreSQL**, and **Redis**.
+Deployed live on AWS EC2 — [http://13.114.19.198:8080/health](http://13.114.19.198:8080/health)
 
 ---
 
-## ローカル起動手順
+## Architecture
 
-### 1. 環境変数の設定
+```
+┌─────────────────────────────────────────────────────────┐
+│                        Client                           │
+└────────────────────────┬────────────────────────────────┘
+                         │ HTTP
+┌────────────────────────▼────────────────────────────────┐
+│                    AWS EC2 (ap-northeast-1)              │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │                  Gin HTTP Server                 │   │
+│  │  ┌──────────┐  ┌────────────┐  ┌─────────────┐  │   │
+│  │  │  Handler │→ │  Service   │→ │ Repository  │  │   │
+│  │  │  (HTTP)  │  │ (Business) │  │ (DB Access) │  │   │
+│  │  └──────────┘  └────────────┘  └──────┬──────┘  │   │
+│  │                                        │         │   │
+│  │       ┌────────────────────────────────┘         │   │
+│  │       │                                          │   │
+│  │  ┌────▼────────┐      ┌───────────────┐          │   │
+│  │  │ PostgreSQL  │      │  Redis Cache  │          │   │
+│  │  │ (Users /    │      │ (Rankings TTL │          │   │
+│  │  │  Scores)    │      │  60s)         │          │   │
+│  │  └─────────────┘      └───────────────┘          │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Request flow:**
+1. Client sends HTTP request
+2. JWT middleware validates Bearer token (auth-required routes)
+3. Handler parses request → delegates to Service layer
+4. Service applies business logic → calls Repository
+5. Repository queries PostgreSQL (write/read) or Redis (ranking cache)
+6. Response returned as JSON
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Version | Purpose |
+|-------|-----------|---------|---------|
+| Language | Go | 1.23 | Application runtime |
+| Framework | Gin | v1.9.1 | HTTP router & middleware |
+| Database | PostgreSQL | 16 | User & score persistence |
+| Cache | Redis | 7 | Ranking cache (TTL: 60s) |
+| Auth | golang-jwt | v5.2.1 | JWT token generation & validation |
+| DB Driver | pgx | v5.5.5 | PostgreSQL connection pool |
+| Redis Client | go-redis | v9.5.1 | Redis client |
+| Password | bcrypt | x/crypto | Password hashing |
+| Container | Docker / Docker Compose | — | Local dev environment |
+| CI/CD | GitHub Actions | — | Auto-deploy to EC2 |
+| Deploy | AWS EC2 | t3.micro | Production server |
+
+---
+
+## API Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|:----:|-------------|
+| `GET` | `/health` | — | Health check (returns version & status) |
+| `POST` | `/api/v1/auth/register` | — | Register a new player account |
+| `POST` | `/api/v1/auth/login` | — | Login and receive JWT token |
+| `GET` | `/api/v1/rankings` | — | Get top rankings (Redis-cached, TTL 60s) |
+| `GET` | `/api/v1/players` | — | List all players |
+| `GET` | `/api/v1/players/:id` | — | Get a specific player by UUID |
+| `POST` | `/api/v1/scores` | **JWT** | Submit a new score |
+| `GET` | `/api/v1/scores/me` | **JWT** | Get your own score history |
+
+> **Auth:** Pass `Authorization: Bearer <token>` header for JWT-required routes.
+
+See full request/response schemas in [`docs/swagger.yaml`](docs/swagger.yaml).
+
+---
+
+## Project Structure
+
+```
+game-score-api/
+├── cmd/
+│   └── server/
+│       └── main.go             # Entry point, DI wiring, routing
+├── internal/
+│   ├── handler/
+│   │   ├── auth.go             # POST /register, POST /login
+│   │   ├── score.go            # POST /scores, GET /scores/me, GET /rankings
+│   │   └── player.go           # GET /players, GET /players/:id
+│   ├── service/
+│   │   ├── auth_service.go     # Register (bcrypt), Login (JWT issue)
+│   │   └── score_service.go    # Score submit, Redis cache logic
+│   ├── repository/
+│   │   ├── user_repo.go        # Create, FindByEmail, FindByID, FindAll
+│   │   └── score_repo.go       # Create, FindByUserID, GetRankings, CountAll
+│   └── model/
+│       ├── user.go             # User struct, RegisterRequest, LoginRequest/Response
+│       └── score.go            # Score struct, PostScoreRequest, RankingResponse
+├── pkg/
+│   ├── auth/
+│   │   └── jwt.go              # JWT generate & validate
+│   ├── database/
+│   │   ├── postgres.go         # PostgreSQL connection pool
+│   │   └── redis.go            # Redis connection
+│   └── middleware/
+│       └── auth.go             # JWT authentication middleware
+├── migrations/
+│   ├── 001_create_users.sql    # users table with UUID PK
+│   └── 002_create_scores.sql   # scores table + performance indexes
+├── docs/
+│   └── swagger.yaml            # OpenAPI 3.0 spec
+├── .github/
+│   └── workflows/
+│       └── deploy.yml          # GitHub Actions — build & deploy to EC2
+├── docker-compose.yml          # PostgreSQL + Redis for local dev
+├── Dockerfile                  # Multi-stage build (alpine)
+└── .env.example                # Environment variable template
+```
+
+---
+
+## Local Development
+
+### Prerequisites
+
+- Go 1.23+
+- Docker & Docker Compose
+- Git
+
+### 1. Clone & configure
 
 ```bash
+git clone https://github.com/natuomi/game-score-api.git
+cd game-score-api
 cp .env.example .env
-# .env を編集（JWT_SECRET は必ず変更すること）
+# Edit .env — change JWT_SECRET at minimum
 ```
 
-### 2. Docker Compose で起動
+### 2. Start PostgreSQL & Redis
 
 ```bash
-# PostgreSQL・Redis・APIサーバーをまとめて起動
-docker compose up --build
-
-# バックグラウンド起動
-docker compose up -d --build
+# Start only the dependencies (PostgreSQL + Redis)
+docker compose up -d postgres redis
 ```
 
-### 3. 動作確認
+### 3. Run the API server
 
 ```bash
-# ヘルスチェック
+go run ./cmd/server
+```
+
+The server starts on `http://localhost:8080`.
+
+> **Note:** The Dockerfile-based API container has a known runc path issue on some setups.
+> Running `go run ./cmd/server` directly is the recommended local approach.
+
+### 4. Verify it's working
+
+```bash
+# Health check
 curl http://localhost:8080/health
+# Expected: {"status":"ok","version":"1.0.0"}
 
-# ユーザー登録
+# Register a player
 curl -X POST http://localhost:8080/api/v1/auth/register \
   -H "Content-Type: application/json" \
   -d '{"name":"Alice","email":"alice@example.com","password":"password123"}'
 
-# ログイン → JWT取得
-curl -X POST http://localhost:8080/api/v1/auth/login \
+# Login and capture token
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email":"alice@example.com","password":"password123"}'
+  -d '{"email":"alice@example.com","password":"password123"}' | jq -r '.token')
 
-# ランキング取得（認証不要）
+# Submit a score (JWT required)
+curl -X POST http://localhost:8080/api/v1/scores \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"score":9500,"game_mode":"classic"}'
+
+# Get rankings (cached after first call)
 curl http://localhost:8080/api/v1/rankings
+# First call:  "cached": false  (PostgreSQL)
+# Second call: "cached": true   (Redis, TTL 60s)
+```
+
+### 5. Run DB migrations (first time only)
+
+```bash
+# Connect to PostgreSQL and run migration files
+psql -h localhost -U postgres -d game_score -f migrations/001_create_users.sql
+psql -h localhost -U postgres -d game_score -f migrations/002_create_scores.sql
 ```
 
 ---
 
-## APIエンドポイント一覧
+## Environment Variables
 
-| Method | Path | 認証 | 説明 |
-|--------|------|------|------|
-| POST | `/api/v1/auth/register` | 不要 | ユーザー登録 |
-| POST | `/api/v1/auth/login` | 不要 | ログイン・JWT発行 |
-| GET  | `/api/v1/rankings` | 不要 | ランキング取得（Redisキャッシュ） |
-| GET  | `/api/v1/players` | 不要 | プレイヤー一覧 |
-| GET  | `/api/v1/players/:id` | 不要 | プレイヤー詳細 |
-| POST | `/api/v1/scores` | **必要** | スコア登録 |
-| GET  | `/api/v1/scores/me` | **必要** | 自分のスコア履歴 |
-| GET  | `/health` | 不要 | ヘルスチェック（ECS ALB用） |
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `PORT` | HTTP server port | `8080` |
+| `GIN_MODE` | Gin mode (`debug` / `release`) | `release` |
+| `JWT_SECRET` | Secret key for JWT signing | `change-me-in-production` |
+| `DB_HOST` | PostgreSQL host | `localhost` |
+| `DB_PORT` | PostgreSQL port | `5432` |
+| `DB_USER` | PostgreSQL user | `postgres` |
+| `DB_PASSWORD` | PostgreSQL password | `postgres` |
+| `DB_NAME` | PostgreSQL database name | `game_score` |
+| `REDIS_HOST` | Redis host | `localhost` |
+| `REDIS_PORT` | Redis port | `6379` |
+| `REDIS_PASSWORD` | Redis password (leave empty if none) | `` |
+| `RANKING_CACHE_TTL` | Ranking cache TTL in seconds | `60` |
+| `RANKING_LIMIT` | Max entries in rankings | `100` |
 
----
-
-## フォルダ構成
-
-```
-game-score-api/
-├── cmd/server/main.go       # エントリーポイント
-├── internal/
-│   ├── handler/             # HTTPハンドラー
-│   ├── service/             # ビジネスロジック
-│   ├── repository/          # DB操作
-│   └── model/               # データ構造（struct）
-├── pkg/
-│   ├── auth/jwt.go          # JWT生成・検証
-│   ├── database/            # PostgreSQL・Redis接続
-│   └── middleware/auth.go   # JWTミドルウェア
-├── migrations/              # SQLマイグレーション
-├── docker-compose.yml
-├── Dockerfile               # マルチステージビルド
-└── .env.example
-```
+Copy `.env.example` to `.env` and fill in your values. **Never commit `.env` to Git.**
 
 ---
 
-## 学習フェーズ
+## CI/CD — GitHub Actions
 
-- **Phase 1** ローカル開発 — Go + Gin + PostgreSQL + Redis + JWT
-- **Phase 2** AWSデプロイ — ECS Fargate + RDS + ElastiCache + GitHub Actions
-- **Phase 3** 品質向上 — テスト・Swagger・レートリミット
-- **Phase 4** Kubernetes — EKS移行（オプション）
+On every push to `main`, the workflow in `.github/workflows/deploy.yml`:
+1. Sets up Go 1.23
+2. Cross-compiles a Linux binary (`GOOS=linux GOARCH=amd64`)
+3. Transfers the binary to AWS EC2 via SCP
+4. Restarts the server process over SSH
+
+**Required GitHub Secrets:**
+
+| Secret | Description |
+|--------|-------------|
+| `EC2_HOST` | Public IP or hostname of the EC2 instance |
+| `EC2_USER` | SSH login user (e.g., `ec2-user`, `ubuntu`) |
+| `EC2_SSH_KEY` | Private SSH key (PEM content) for EC2 access |
+
+Set these in **GitHub → Settings → Secrets and variables → Actions**.
 
 ---
 
-## 設計書
+## API Documentation
 
-`dev/specs/2026-04-20-game-score-api.md` を参照。
+Full OpenAPI 3.0 specification: [`docs/swagger.yaml`](docs/swagger.yaml)
+
+You can preview it with:
+- [Swagger Editor](https://editor.swagger.io/) — paste the YAML content
+- VS Code extension: **OpenAPI (Swagger) Editor**
+
+---
+
+## Live Demo
+
+- **Health check:** [http://13.114.19.198:8080/health](http://13.114.19.198:8080/health)
+- **Rankings:** [http://13.114.19.198:8080/api/v1/rankings](http://13.114.19.198:8080/api/v1/rankings)
+
+---
+
+## Roadmap
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| Phase 1 | Done | Local dev — Go + Gin + PostgreSQL + Redis + JWT |
+| Phase 2 | Done | AWS EC2 deploy — binary + systemd/nohup |
+| Phase 3 | In Progress | CI/CD — GitHub Actions auto-deploy |
+| Phase 4 | Planned | Testing — unit & integration tests |
+| Phase 5 | Planned | Kubernetes — EKS migration (optional) |

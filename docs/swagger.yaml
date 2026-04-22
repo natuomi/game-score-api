@@ -1,0 +1,642 @@
+openapi: 3.0.3
+
+info:
+  title: Game Score API
+  description: |
+    A RESTful API for managing game scores and player rankings.
+
+    Built with **Go 1.23 / Gin / PostgreSQL / Redis** and deployed on AWS EC2.
+
+    ## Authentication
+    Protected endpoints require a Bearer JWT token in the `Authorization` header.
+    Obtain a token via `POST /api/v1/auth/login`.
+
+    ```
+    Authorization: Bearer <your_jwt_token>
+    ```
+
+    ## Ranking Cache
+    `GET /api/v1/rankings` is Redis-cached with a TTL of 60 seconds.
+    The response includes a `cached` flag to indicate the data source.
+  version: "1.0.0"
+  contact:
+    name: natuomi
+    url: https://github.com/natuomi/game-score-api
+
+servers:
+  - url: http://13.114.19.198:8080
+    description: Production (AWS EC2 ap-northeast-1)
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: health
+    description: Server health check
+  - name: auth
+    description: User registration and login
+  - name: scores
+    description: Score submission and history (JWT required for write/personal endpoints)
+  - name: rankings
+    description: Public leaderboard (Redis-cached)
+  - name: players
+    description: Player listing and detail
+
+paths:
+
+  # ──────────────────────────────────────
+  # Health
+  # ──────────────────────────────────────
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check
+      description: Returns server status and version. Used by EC2 monitoring.
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                status: ok
+                version: 1.0.0
+
+  # ──────────────────────────────────────
+  # Auth
+  # ──────────────────────────────────────
+  /api/v1/auth/register:
+    post:
+      tags:
+        - auth
+      summary: Register a new player
+      description: Creates a new player account. Name and email must be unique.
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+            example:
+              name: Alice
+              email: alice@example.com
+              password: password123
+      responses:
+        "201":
+          description: Player registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+              example:
+                user:
+                  id: 550e8400-e29b-41d4-a716-446655440000
+                  name: Alice
+                  email: alice@example.com
+                  created_at: "2026-04-22T10:00:00Z"
+                  updated_at: "2026-04-22T10:00:00Z"
+        "400":
+          description: Validation error (missing fields or format error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: "Key: 'RegisterRequest.Email' Error:Field validation for 'Email' failed on the 'email' tag"
+        "409":
+          description: Email or name already in use
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: email or name already in use
+
+  /api/v1/auth/login:
+    post:
+      tags:
+        - auth
+      summary: Login and receive JWT
+      description: Authenticates a player and returns a signed JWT token valid for 24 hours.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+            example:
+              email: alice@example.com
+              password: password123
+      responses:
+        "200":
+          description: Login successful — token included in response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+              example:
+                token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                user:
+                  id: 550e8400-e29b-41d4-a716-446655440000
+                  name: Alice
+                  email: alice@example.com
+                  created_at: "2026-04-22T10:00:00Z"
+                  updated_at: "2026-04-22T10:00:00Z"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: invalid email or password
+
+  # ──────────────────────────────────────
+  # Scores
+  # ──────────────────────────────────────
+  /api/v1/scores:
+    post:
+      tags:
+        - scores
+      summary: Submit a score
+      description: |
+        Records a new score for the authenticated player.
+        Requires a valid JWT token.
+      operationId: postScore
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PostScoreRequest"
+            example:
+              score: 9500
+              game_mode: classic
+      responses:
+        "201":
+          description: Score recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Score"
+              example:
+                id: 7f3a9b2c-1234-5678-abcd-ef0123456789
+                user_id: 550e8400-e29b-41d4-a716-446655440000
+                score: 9500
+                game_mode: classic
+                created_at: "2026-04-22T10:05:00Z"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid JWT token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: unauthorized
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/scores/me:
+    get:
+      tags:
+        - scores
+      summary: Get your score history
+      description: |
+        Returns all scores submitted by the authenticated player, ordered by most recent.
+        Requires a valid JWT token.
+      operationId: getMyScores
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Score history for the authenticated player
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MyScoresResponse"
+              example:
+                scores:
+                  - id: 7f3a9b2c-1234-5678-abcd-ef0123456789
+                    user_id: 550e8400-e29b-41d4-a716-446655440000
+                    score: 9500
+                    game_mode: classic
+                    created_at: "2026-04-22T10:05:00Z"
+                  - id: 8e4b0c3d-abcd-ef01-2345-678901234567
+                    user_id: 550e8400-e29b-41d4-a716-446655440000
+                    score: 8200
+                    game_mode: time-attack
+                    created_at: "2026-04-21T09:30:00Z"
+        "401":
+          description: Missing or invalid JWT token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ──────────────────────────────────────
+  # Rankings
+  # ──────────────────────────────────────
+  /api/v1/rankings:
+    get:
+      tags:
+        - rankings
+      summary: Get top rankings
+      description: |
+        Returns the top-scored players across all game modes.
+        Results are cached in Redis for 60 seconds to reduce DB load.
+        The `cached` field in the response indicates whether data was served from cache.
+      operationId: getRankings
+      responses:
+        "200":
+          description: Ranking list (may be served from Redis cache)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RankingResponse"
+              examples:
+                from_database:
+                  summary: First call — fetched from PostgreSQL
+                  value:
+                    rankings:
+                      - rank: 1
+                        player_name: Alice
+                        score: 9500
+                        game_mode: classic
+                        created_at: "2026-04-22T10:05:00Z"
+                      - rank: 2
+                        player_name: Bob
+                        score: 8800
+                        game_mode: time-attack
+                        created_at: "2026-04-22T09:00:00Z"
+                    cached: false
+                    total: 2
+                from_cache:
+                  summary: Subsequent call — served from Redis
+                  value:
+                    rankings:
+                      - rank: 1
+                        player_name: Alice
+                        score: 9500
+                        game_mode: classic
+                        created_at: "2026-04-22T10:05:00Z"
+                    cached: true
+                    total: 1
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ──────────────────────────────────────
+  # Players
+  # ──────────────────────────────────────
+  /api/v1/players:
+    get:
+      tags:
+        - players
+      summary: List all players
+      description: Returns a list of all registered players. No authentication required.
+      operationId: getPlayers
+      responses:
+        "200":
+          description: List of players
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayersResponse"
+              example:
+                players:
+                  - id: 550e8400-e29b-41d4-a716-446655440000
+                    name: Alice
+                    created_at: "2026-04-22T10:00:00Z"
+                    updated_at: "2026-04-22T10:00:00Z"
+                  - id: 661f9511-f30c-52e5-b827-557766551111
+                    name: Bob
+                    created_at: "2026-04-22T09:00:00Z"
+                    updated_at: "2026-04-22T09:00:00Z"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/players/{id}:
+    get:
+      tags:
+        - players
+      summary: Get a player by ID
+      description: Returns a single player's details by their UUID. No authentication required.
+      operationId: getPlayer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Player UUID
+          schema:
+            type: string
+            format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+      responses:
+        "200":
+          description: Player found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Player"
+              example:
+                id: 550e8400-e29b-41d4-a716-446655440000
+                name: Alice
+                created_at: "2026-04-22T10:00:00Z"
+                updated_at: "2026-04-22T10:00:00Z"
+        "404":
+          description: Player not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+              example:
+                error: player not found
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+# ──────────────────────────────────────
+# Components
+# ──────────────────────────────────────
+components:
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT token obtained from `POST /api/v1/auth/login`.
+        Pass as `Authorization: Bearer <token>`.
+
+  schemas:
+
+    # ── Common ──────────────────────
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+      required:
+        - error
+
+    # ── Health ──────────────────────
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+          example: 1.0.0
+      required:
+        - status
+        - version
+
+    # ── Auth ────────────────────────
+    RegisterRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 50
+          description: Display name (must be unique)
+          example: Alice
+        email:
+          type: string
+          format: email
+          description: Email address (must be unique)
+          example: alice@example.com
+        password:
+          type: string
+          minLength: 8
+          description: Password (minimum 8 characters)
+          example: password123
+      required:
+        - name
+        - email
+        - password
+
+    LoginRequest:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+          example: alice@example.com
+        password:
+          type: string
+          example: password123
+      required:
+        - email
+        - password
+
+    RegisterResponse:
+      type: object
+      properties:
+        user:
+          $ref: "#/components/schemas/Player"
+      required:
+        - user
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Signed JWT token (valid for 24 hours)
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        user:
+          $ref: "#/components/schemas/Player"
+      required:
+        - token
+        - user
+
+    # ── Player ──────────────────────
+    Player:
+      type: object
+      description: A registered player (password field is never returned)
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique player ID (UUID v4)
+          example: 550e8400-e29b-41d4-a716-446655440000
+        name:
+          type: string
+          example: Alice
+        email:
+          type: string
+          format: email
+          description: Included in auth responses only; omitted in public player listings
+          example: alice@example.com
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-22T10:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-04-22T10:00:00Z"
+      required:
+        - id
+        - name
+        - created_at
+        - updated_at
+
+    PlayersResponse:
+      type: object
+      properties:
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/Player"
+      required:
+        - players
+
+    # ── Score ───────────────────────
+    PostScoreRequest:
+      type: object
+      properties:
+        score:
+          type: integer
+          minimum: 0
+          description: Score value (non-negative integer)
+          example: 9500
+        game_mode:
+          type: string
+          maxLength: 50
+          description: Game mode identifier (optional, defaults to empty string)
+          example: classic
+      required:
+        - score
+
+    Score:
+      type: object
+      description: A recorded score entry
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 7f3a9b2c-1234-5678-abcd-ef0123456789
+        user_id:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440000
+        score:
+          type: integer
+          example: 9500
+        game_mode:
+          type: string
+          example: classic
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-22T10:05:00Z"
+      required:
+        - id
+        - user_id
+        - score
+        - game_mode
+        - created_at
+
+    MyScoresResponse:
+      type: object
+      properties:
+        scores:
+          type: array
+          items:
+            $ref: "#/components/schemas/Score"
+      required:
+        - scores
+
+    # ── Rankings ────────────────────
+    RankingEntry:
+      type: object
+      description: A single entry in the leaderboard
+      properties:
+        rank:
+          type: integer
+          description: Rank position (1-based)
+          example: 1
+        player_name:
+          type: string
+          example: Alice
+        score:
+          type: integer
+          example: 9500
+        game_mode:
+          type: string
+          example: classic
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-04-22T10:05:00Z"
+      required:
+        - rank
+        - player_name
+        - score
+        - game_mode
+        - created_at
+
+    RankingResponse:
+      type: object
+      properties:
+        rankings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RankingEntry"
+          description: Ordered list from rank 1 (highest score) downward
+        cached:
+          type: boolean
+          description: "`true` if the response was served from Redis cache"
+          example: false
+        total:
+          type: integer
+          description: Total number of ranking entries returned
+          example: 2
+      required:
+        - rankings
+        - cached
+        - total
