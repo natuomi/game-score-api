@@ -63,8 +63,9 @@ func main() {
 
 	v1 := r.Group("/api/v1")
 	{
-		// 認証不要
+		// 認証不要（ブルートフォース対策：IP単位で1分10回まで）
 		auth := v1.Group("/auth")
+		auth.Use(middleware.RateLimit())
 		auth.POST("/register", authH.Register)
 		auth.POST("/login", authH.Login)
 
